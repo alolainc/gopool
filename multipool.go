@@ -37,6 +37,7 @@
 package gopool
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -71,13 +72,13 @@ type MultiPool struct {
 
 // NewMultiPool instantiates a MultiPool with a size of the pool list and a size
 // per pool, and the load-balancing strategy.
-func NewMultiPool(size, sizePerPool int, lbs LoadBalancingStrategy, options ...Option) (*MultiPool, error) {
+func NewMultiPool(ctx context.Context, size int, lbs LoadBalancingStrategy, options ...Option) (*MultiPool, error) {
 	if lbs != RoundRobin && lbs != LeastTasks {
 		return nil, ErrInvalidLoadBalancingStrategy
 	}
 	pools := make([]*Pool, size)
 	for i := 0; i < size; i++ {
-		pool, err := NewPool(sizePerPool, options...)
+		pool, err := NewPool(ctx, options...)
 		if err != nil {
 			return nil, err
 		}
@@ -107,15 +108,15 @@ func (mp *MultiPool) next(lbs LoadBalancingStrategy) (idx int) {
 }
 
 // Submit submits a task to a pool selected by the load-balancing strategy.
-func (mp *MultiPool) Submit(task func()) (err error) {
+func (mp *MultiPool) Submit(task TaskFunc) (err error) {
 	if mp.IsClosed() {
 		return ErrPoolClosed
 	}
-	if err = mp.pools[mp.next(mp.lbs)].Submit(task); err == nil {
+	if err = mp.pools[mp.next(mp.lbs)].Submit(nil, task); err == nil {
 		return
 	}
 	if err == ErrPoolOverload && mp.lbs == RoundRobin {
-		return mp.pools[mp.next(LeastTasks)].Submit(task)
+		return mp.pools[mp.next(LeastTasks)].Submit(nil, task)
 	}
 	return
 }
@@ -203,7 +204,7 @@ func (mp *MultiPool) ReleaseTimeout(timeout time.Duration) error {
 	for i, pool := range mp.pools {
 		func(p *Pool, idx int) {
 			wg.Go(func() error {
-				err := p.ReleaseTimeout(timeout)
+				err := p.ReleaseTimeout(nil, timeout)
 				if err != nil {
 					err = fmt.Errorf("pool %d: %v", idx, err)
 				}
@@ -235,7 +236,7 @@ func (mp *MultiPool) Reboot() {
 	if atomic.CompareAndSwapInt32(&mp.state, CLOSED, OPENED) {
 		atomic.StoreUint32(&mp.index, 0)
 		for _, pool := range mp.pools {
-			pool.Reboot()
+			pool.Reboot(nil)
 		}
 	}
 }
