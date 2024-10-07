@@ -37,6 +37,7 @@
 package gopool
 
 import (
+	"context"
 	"runtime/debug"
 	"time"
 )
@@ -48,8 +49,8 @@ type goWorker struct {
 	// pool who owns this worker.
 	pool *Pool
 
-	// task is a job should be done.
-	task chan func()
+	// taskCh is a job should be done.
+	taskCh TaskStream
 
 	// lastUsed will be updated when putting a worker back into queue.
 	lastUsed time.Time
@@ -78,7 +79,7 @@ func (w *goWorker) run() {
 			w.pool.cond.Signal()
 		}()
 
-		for f := range w.task {
+		for f := range w.taskCh {
 			if f == nil {
 				return
 			}
@@ -90,18 +91,23 @@ func (w *goWorker) run() {
 	}()
 }
 
-func (w *goWorker) finish() {
-	w.task <- nil
+func (w *goWorker) finish(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+	case w.taskCh <- nil: // ✨:
+	}
 }
 
 func (w *goWorker) lastUsedTime() time.Time {
 	return w.lastUsed
 }
 
-func (w *goWorker) inputFunc(fn func()) {
-	w.task <- fn
+func (w *goWorker) sendTask(ctx context.Context, fn TaskFunc) {
+	select {
+	case <-ctx.Done():
+	case w.taskCh <- fn:
+	}
 }
-
-func (w *goWorker) inputParam(interface{}) {
+func (w *goWorker)  sendParam(context.Context, InputParam) {
 	panic("unreachable")
 }

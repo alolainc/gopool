@@ -37,6 +37,7 @@
 package gopool
 
 import (
+	"context"
 	"errors"
 	"log"
 	"math"
@@ -63,7 +64,7 @@ const (
 
 var (
 	// ErrLackPoolFunc will be returned when invokers don't provide function for pool.
-	ErrLackPoolFunc = errors.New("must provide function for pool")
+	ErrLackPoolFunc = errors.New("[gopool]: must provide function for pool")
 
 	// ErrInvalidPoolExpiry will be returned when setting a negative number as the periodic duration to purge goroutines.
 	ErrInvalidPoolExpiry = errors.New("invalid expiry for pool")
@@ -107,7 +108,7 @@ var (
 	defaultLogger = Logger(log.New(os.Stderr, "[gopool]: ", log.LstdFlags|logLmsgprefix|log.Lmicroseconds))
 
 	// Init an instance pool when importing gopool.
-	defaultGoPool, _ = NewPool(DefaultGoPoolSize)
+	defaultGoPool, _ = NewPool(context.Background(), WithSize(DefaultGoPoolSize))
 )
 
 const nowTimeUpdateInterval = 500 * time.Millisecond
@@ -118,9 +119,22 @@ type Logger interface {
 	Printf(format string, args ...interface{})
 }
 
+type (
+	TaskFunc    func()
+	TaskStream  chan TaskFunc
+	InputParam  interface{}
+	PoolFunc    func(InputParam)
+	InputStream chan InputParam
+	Nothing     struct{}
+)
+
+// const (
+// 	releaseTimeoutInterval = 10
+// )
+
 // Submit submits a task to pool.
-func Submit(task func()) error {
-	return defaultGoPool.Submit(task)
+func Submit(ctx context.Context, task TaskFunc) error {
+	return defaultGoPool.Submit(ctx, task)
 }
 
 // Running returns the number of the currently running goroutines.
@@ -139,16 +153,16 @@ func Free() int {
 }
 
 // Release Closes the default pool.
-func Release() {
-	defaultGoPool.Release()
+func Release(ctx context.Context) {
+	defaultGoPool.Release(ctx)
 }
 
 // ReleaseTimeout is like Release but with a timeout, it waits all workers to exit before timing out.
-func ReleaseTimeout(timeout time.Duration) error {
-	return defaultGoPool.ReleaseTimeout(timeout)
+func ReleaseTimeout(ctx context.Context, timeout time.Duration) error {
+	return defaultGoPool.ReleaseTimeout(ctx, timeout)
 }
 
 // Reboot reboots the default pool.
-func Reboot() {
-	defaultGoPool.Reboot()
+func Reboot(ctx context.Context) {
+	defaultGoPool.Reboot(ctx)
 }
