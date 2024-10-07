@@ -14,7 +14,10 @@
 
 package gopool
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type workerStack struct {
 	items  []worker
@@ -86,9 +89,9 @@ func (wq *workerStack) binarySearch(l, r int, expiryTime time.Time) int {
 	return r
 }
 
-func (wq *workerStack) reset() {
+func (wq *workerStack) reset(ctx context.Context) {
 	for i := 0; i < wq.len(); i++ {
-		wq.items[i].finish()
+		wq.items[i].finish(ctx)
 		wq.items[i] = nil
 	}
 	wq.items = wq.items[:0]

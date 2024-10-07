@@ -15,6 +15,7 @@
 package gopool
 
 import (
+	"context"
 	"errors"
 	"time"
 )
@@ -29,19 +30,19 @@ var (
 
 type worker interface {
 	run()
-	finish()
+	finish(context.Context)
 	lastUsedTime() time.Time
-	inputFunc(func())
-	inputParam(interface{})
+	sendTask(context.Context, TaskFunc)
+	sendParam(context.Context, InputParam)
 }
 
 type workerQueue interface {
-	len() int
+	len() int // rename to length
 	isEmpty() bool
 	insert(worker) error
 	detach() worker
 	refresh(duration time.Duration) []worker // clean up the stale workers and return them
-	reset()
+	reset(context.Context)
 }
 
 type queueType int

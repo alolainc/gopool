@@ -14,7 +14,10 @@
 
 package gopool
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type loopQueue struct {
 	items  []worker
@@ -153,14 +156,14 @@ func (wq *loopQueue) binarySearch(expiryTime time.Time) int {
 	return (r + basel + nlen) % nlen
 }
 
-func (wq *loopQueue) reset() {
+func (wq *loopQueue) reset(ctx context.Context) {
 	if wq.isEmpty() {
 		return
 	}
 
 retry:
 	if w := wq.detach(); w != nil {
-		w.finish()
+		w.finish(ctx)
 		goto retry
 	}
 	wq.items = wq.items[:0]

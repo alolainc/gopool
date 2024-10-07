@@ -14,18 +14,53 @@
 
 package gopool
 
-import "time"
+import (
+	"runtime"
+	"time"
+)
 
 // Option represents the optional function.
 type Option func(opts *Options)
 
-func loadOptions(options ...Option) *Options {
+// NewOptions creates new options instance with defaults
+// applied.
+func NewOptions(options ...Option) *Options {
 	opts := new(Options)
-	for _, option := range options {
-		option(opts)
+	combined := withDefaults(options...)
+
+	for _, option := range combined {
+		if option != nil { // nil check supports conditional options
+			option(opts)
+		}
 	}
+
 	return opts
 }
+
+// IfOption enables options to be conditional. IfOption condition evaluates to true
+// then the option is returned, otherwise nil.
+func IfOption(condition bool, option Option) Option {
+	if condition {
+		return option
+	}
+
+	return nil
+}
+
+func withDefaults(options ...Option) []Option {
+	defaults := []Option{
+		WithSize(runtime.NumCPU()),
+	}
+
+	o := make([]Option, 0, len(options)+len(defaults))
+	o = append(o,
+		defaults...,
+	)
+	o = append(o, options...)
+
+	return o
+}
+
 
 // Options contains all options which will be applied when instantiating an go pool.
 type Options struct {
@@ -56,6 +91,10 @@ type Options struct {
 
 	// When DisablePurge is true, workers are not purged and are resident.
 	DisablePurge bool
+
+	// Size denotes the number of workers in the pool. Defaults
+	// to number of CPUs available, if not specified.
+	Size int
 }
 
 // WithOptions accepts the whole options config.
@@ -111,5 +150,11 @@ func WithLogger(logger Logger) Option {
 func WithDisablePurge(disable bool) Option {
 	return func(opts *Options) {
 		opts.DisablePurge = disable
+	}
+}
+
+func WithSize(size int) Option {
+	return func(opts *Options) {
+		opts.Size = size
 	}
 }

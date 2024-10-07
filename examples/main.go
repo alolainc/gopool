@@ -37,6 +37,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -50,28 +51,32 @@ var sum int32
 func myFunc(i interface{}) {
 	n := i.(int32)
 	atomic.AddInt32(&sum, n)
-	fmt.Printf("run with %d\n", n)
+	// fmt.Printf("run with %d\n", n)
 }
 
 func demoFunc() {
 	time.Sleep(10 * time.Millisecond)
-	fmt.Println("Hello World!")
+	// fmt.Println("Hello World!")
 }
 
 func main() {
-	defer gopool.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	defer cancel()
+	defer gopool.Release(ctx)
 
 	runTimes := 1000
 
 	// Use the common pool.
 	var wg sync.WaitGroup
+
 	syncCalculateSum := func() {
 		demoFunc()
 		wg.Done()
 	}
 	for i := 0; i < runTimes; i++ {
 		wg.Add(1)
-		_ = gopool.Submit(syncCalculateSum)
+		_ = gopool.Submit(ctx, syncCalculateSum)
 	}
 	wg.Wait()
 	fmt.Printf("running goroutines: %d\n", gopool.Running())
@@ -79,15 +84,15 @@ func main() {
 
 	// Use the pool with a function,
 	// set 10 to the capacity of goroutine pool and 1 second for expired duration.
-	p, _ := gopool.NewPoolWithFunc(10, func(i interface{}) {
+	p, _ := gopool.NewPoolWithFunc(ctx, func(i gopool.InputParam) {
 		myFunc(i)
 		wg.Done()
-	})
-	defer p.Release()
+	}, gopool.WithSize(10))
+	defer p.Release(ctx)
 	// Submit tasks one by one.
 	for i := 0; i < runTimes; i++ {
 		wg.Add(1)
-		_ = p.Invoke(int32(i))
+		_ = p.Invoke(ctx, int32(i))
 	}
 	wg.Wait()
 	fmt.Printf("running goroutines: %d\n", p.Running())
@@ -99,8 +104,8 @@ func main() {
 	// Use the MultiPool and set the capacity of the 10 goroutine pools to unlimited.
 	// If you use -1 as the pool size parameter, the size will be unlimited.
 	// There are two load-balancing algorithms for pools: gopool.RoundRobin and gopool.LeastTasks.
-	mp, _ := gopool.NewMultiPool(10, -1, gopool.RoundRobin)
-	defer mp.ReleaseTimeout(5 * time.Second)
+	mp, _ := gopool.NewMultiPool(nil, 10, gopool.RoundRobin, gopool.WithSize(-1))
+	defer mp.ReleaseTimeout(1 * time.Second)
 	for i := 0; i < runTimes; i++ {
 		wg.Add(1)
 		_ = mp.Submit(syncCalculateSum)
@@ -110,11 +115,11 @@ func main() {
 	fmt.Printf("finish all tasks.\n")
 
 	// Use the MultiPoolFunc and set the capacity of 10 goroutine pools to (runTimes/10).
-	mpf, _ := gopool.NewMultiPoolWithFunc(10, runTimes/10, func(i interface{}) {
+	mpf, _ := gopool.NewMultiPoolWithFunc(nil, 10, func(i gopool.InputParam) {
 		myFunc(i)
 		wg.Done()
-	}, gopool.LeastTasks)
-	defer mpf.ReleaseTimeout(5 * time.Second)
+	}, gopool.LeastTasks, gopool.WithSize(runTimes/10))
+	defer mpf.ReleaseTimeout(1 * time.Second)
 	for i := 0; i < runTimes; i++ {
 		wg.Add(1)
 		_ = mpf.Invoke(int32(i))
