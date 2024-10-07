@@ -38,6 +38,7 @@ package gopool
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,18 +52,20 @@ type PoolWithFunc struct {
 	poolCommon
 
 	// poolFunc is the function for processing tasks.
-	poolFunc func(interface{})
+	poolFunc PoolFunc
 }
 
 // purgeStaleWorkers clears stale workers periodically, it runs in an individual goroutine, as a scavenger.
-func (p *PoolWithFunc) purgeStaleWorkers() {
+func (p *PoolWithFunc) purgeStaleWorkers(purgeCtx context.Context) {
 	ticker := time.NewTicker(p.options.ExpiryDuration)
 	defer func() {
 		ticker.Stop()
 		atomic.StoreInt32(&p.purgeDone, 1)
 	}()
 
-	purgeCtx := p.purgeCtx // copy to the local variable to avoid race from Reboot()
+	if purgeCtx == nil {
+		purgeCtx = p.purgeCtx // copy to the local variable to avoid race from Reboot(ctx)
+	}
 	for {
 		select {
 		case <-purgeCtx.Done():
@@ -86,7 +89,7 @@ func (p *PoolWithFunc) purgeStaleWorkers() {
 		// may be blocking and may consume a lot of time if many workers
 		// are located on non-local CPUs.
 		for i := range staleWorkers {
-			staleWorkers[i].finish()
+			staleWorkers[i].finish(purgeCtx)
 			staleWorkers[i] = nil
 		}
 
@@ -99,14 +102,16 @@ func (p *PoolWithFunc) purgeStaleWorkers() {
 }
 
 // ticktock is a goroutine that updates the current time in the pool regularly.
-func (p *PoolWithFunc) ticktock() {
+func (p *PoolWithFunc) ticktock(ticktockCtx context.Context) {
 	ticker := time.NewTicker(nowTimeUpdateInterval)
 	defer func() {
 		ticker.Stop()
 		atomic.StoreInt32(&p.ticktockDone, 1)
 	}()
 
-	ticktockCtx := p.ticktockCtx // copy to the local variable to avoid race from Reboot()
+	if ticktockCtx == nil {
+		ticktockCtx = p.ticktockCtx // copy to the local variable to avoid race from Reboot(ctx)
+	}
 	for {
 		select {
 		case <-ticktockCtx.Done():
@@ -122,20 +127,20 @@ func (p *PoolWithFunc) ticktock() {
 	}
 }
 
-func (p *PoolWithFunc) goPurge() {
+func (p *PoolWithFunc) goPurge(ctx context.Context) {
 	if p.options.DisablePurge {
 		return
 	}
 
 	// Start a goroutine to clean up expired workers periodically.
-	p.purgeCtx, p.stopPurge = context.WithCancel(context.Background())
-	go p.purgeStaleWorkers()
+	p.purgeCtx, p.stopPurge = context.WithCancel(ctx)
+	go p.purgeStaleWorkers(p.purgeCtx)
 }
 
-func (p *PoolWithFunc) goTicktock() {
+func (p *PoolWithFunc) goTicktock(ctx context.Context) {
 	p.now.Store(time.Now())
-	p.ticktockCtx, p.stopTicktock = context.WithCancel(context.Background())
-	go p.ticktock()
+	p.ticktockCtx, p.stopTicktock = context.WithCancel(ctx)
+	go p.ticktock(p.ticktockCtx)
 }
 
 func (p *PoolWithFunc) nowTime() time.Time {
@@ -143,16 +148,17 @@ func (p *PoolWithFunc) nowTime() time.Time {
 }
 
 // NewPoolWithFunc instantiates a PoolWithFunc with customized options.
-func NewPoolWithFunc(size int, pf func(interface{}), options ...Option) (*PoolWithFunc, error) {
-	if size <= 0 {
-		size = -1
-	}
-
+func NewPoolWithFunc(ctx context.Context, pf PoolFunc, options ...Option) (*PoolWithFunc, error) {
 	if pf == nil {
 		return nil, ErrLackPoolFunc
 	}
 
-	opts := loadOptions(options...)
+	opts := NewOptions(options...)
+	size := opts.Size
+
+	if size == 0 {
+		size = runtime.NumCPU()
+	}
 
 	if !opts.DisablePurge {
 		if expiry := opts.ExpiryDuration; expiry < 0 {
@@ -166,9 +172,13 @@ func NewPoolWithFunc(size int, pf func(interface{}), options ...Option) (*PoolWi
 		opts.Logger = defaultLogger
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	p := &PoolWithFunc{
 		poolCommon: poolCommon{
-			capacity: int32(size),
+			capacity: int32(size), //nolint:gosec // ok
 			allDone:  make(chan struct{}),
 			lock:     syncx.NewSpinLock(),
 			once:     &sync.Once{},
@@ -176,25 +186,25 @@ func NewPoolWithFunc(size int, pf func(interface{}), options ...Option) (*PoolWi
 		},
 		poolFunc: pf,
 	}
-	p.workerCache.New = func() interface{} {
+	p.workerCache.New = func() interface{} { // interface{} => sync.Pool api
 		return &goWorkerWithFunc{
 			pool: p,
-			args: make(chan interface{}, workerChanCap),
+			inputCh: make(InputStream, workerChanCap),
 		}
 	}
 	if p.options.PreAlloc {
-		if size == -1 {
+		if size <= -1 {
 			return nil, ErrInvalidPreAllocSize
 		}
-		p.workers = newWorkerQueue(queueTypeLoopQueue, size)
+		p.workers = newWorkerQueue(queueTypeLoopQueue, size) //nolint:gosec // ok
 	} else {
 		p.workers = newWorkerQueue(queueTypeStack, 0)
 	}
 
 	p.cond = sync.NewCond(p.lock)
 
-	p.goPurge()
-	p.goTicktock()
+	p.goPurge(ctx)
+	p.goTicktock(ctx)
 
 	return p, nil
 }
@@ -205,14 +215,18 @@ func NewPoolWithFunc(size int, pf func(interface{}), options ...Option) (*PoolWi
 // but what calls for special attention is that you will get blocked with the last
 // Pool.Invoke() call once the current Pool runs out of its capacity, and to avoid this,
 // you should instantiate a PoolWithFunc with gopool.WithNonblocking(true).
-func (p *PoolWithFunc) Invoke(args interface{}) error {
+func (p *PoolWithFunc) Invoke(ctx context.Context, job InputParam) error {
 	if p.IsClosed() {
 		return ErrPoolClosed
 	}
 
+	if ctx == nil {
+		ctx = p.purgeCtx
+	}
+
 	w, err := p.retrieveWorker()
 	if w != nil {
-		w.inputParam(args)
+		w.sendParam(ctx, job)
 	}
 	return err
 }
@@ -263,9 +277,13 @@ func (p *PoolWithFunc) IsClosed() bool {
 }
 
 // Release closes this pool and releases the worker queue.
-func (p *PoolWithFunc) Release() {
+func (p *PoolWithFunc) Release(ctx context.Context) {
 	if !atomic.CompareAndSwapInt32(&p.state, OPENED, CLOSED) {
 		return
+	}
+
+	if ctx == nil {
+		ctx = p.purgeCtx
 	}
 
 	if p.stopPurge != nil {
@@ -278,7 +296,7 @@ func (p *PoolWithFunc) Release() {
 	}
 
 	p.lock.Lock()
-	p.workers.reset()
+	p.workers.reset(ctx)
 	p.lock.Unlock()
 	// There might be some callers waiting in retrieveWorker(), so we need to wake them up to prevent
 	// those callers blocking infinitely.
@@ -286,16 +304,20 @@ func (p *PoolWithFunc) Release() {
 }
 
 // ReleaseTimeout is like Release but with a timeout, it waits all workers to exit before timing out.
-func (p *PoolWithFunc) ReleaseTimeout(timeout time.Duration) error {
+func (p *PoolWithFunc) ReleaseTimeout(ctx context.Context, timeout time.Duration) error {
 	if p.IsClosed() || (!p.options.DisablePurge && p.stopPurge == nil) || p.stopTicktock == nil {
 		return ErrPoolClosed
 	}
 
-	p.Release()
+	if ctx == nil {
+		ctx = p.purgeCtx
+	}
+
+	p.Release(ctx)
 
 	var purgeCh <-chan struct{}
 	if !p.options.DisablePurge {
-		purgeCh = p.purgeCtx.Done()
+		purgeCh = ctx.Done()
 	} else {
 		purgeCh = p.allDone
 	}
@@ -328,12 +350,16 @@ func (p *PoolWithFunc) ReleaseTimeout(timeout time.Duration) error {
 // If you intend to reboot a closed pool, use ReleaseTimeout() instead of
 // Release() to ensure that all workers are stopped and resource are released
 // before rebooting, otherwise you may run into data race.
-func (p *PoolWithFunc) Reboot() {
+func (p *PoolWithFunc) Reboot(ctx context.Context) {
 	if atomic.CompareAndSwapInt32(&p.state, CLOSED, OPENED) {
+		if ctx == nil {
+			ctx = p.purgeCtx
+		}
+		
 		atomic.StoreInt32(&p.purgeDone, 0)
-		p.goPurge()
+		p.goPurge(ctx)
 		atomic.StoreInt32(&p.ticktockDone, 0)
-		p.goTicktock()
+		p.goTicktock(ctx)
 		p.allDone = make(chan struct{})
 		p.once = &sync.Once{}
 	}

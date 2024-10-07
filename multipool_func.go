@@ -37,6 +37,7 @@
 package gopool
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -60,13 +61,13 @@ type MultiPoolWithFunc struct {
 
 // NewMultiPoolWithFunc instantiates a MultiPoolWithFunc with a size of the pool list and a size
 // per pool, and the load-balancing strategy.
-func NewMultiPoolWithFunc(size, sizePerPool int, fn func(interface{}), lbs LoadBalancingStrategy, options ...Option) (*MultiPoolWithFunc, error) {
+func NewMultiPoolWithFunc(ctx context.Context, size int, fn PoolFunc, lbs LoadBalancingStrategy, options ...Option) (*MultiPoolWithFunc, error) {
 	if lbs != RoundRobin && lbs != LeastTasks {
 		return nil, ErrInvalidLoadBalancingStrategy
 	}
 	pools := make([]*PoolWithFunc, size)
 	for i := 0; i < size; i++ {
-		pool, err := NewPoolWithFunc(sizePerPool, fn, options...)
+		pool, err := NewPoolWithFunc(ctx, fn, options...)
 		if err != nil {
 			return nil, err
 		}
@@ -96,16 +97,16 @@ func (mp *MultiPoolWithFunc) next(lbs LoadBalancingStrategy) (idx int) {
 }
 
 // Invoke submits a task to a pool selected by the load-balancing strategy.
-func (mp *MultiPoolWithFunc) Invoke(args interface{}) (err error) {
+func (mp *MultiPoolWithFunc) Invoke(job InputParam) (err error) {
 	if mp.IsClosed() {
 		return ErrPoolClosed
 	}
 
-	if err = mp.pools[mp.next(mp.lbs)].Invoke(args); err == nil {
+	if err = mp.pools[mp.next(mp.lbs)].Invoke(nil, job); err == nil {
 		return
 	}
 	if err == ErrPoolOverload && mp.lbs == RoundRobin {
-		return mp.pools[mp.next(LeastTasks)].Invoke(args)
+		return mp.pools[mp.next(LeastTasks)].Invoke(nil, job)
 	}
 	return
 }
@@ -193,7 +194,7 @@ func (mp *MultiPoolWithFunc) ReleaseTimeout(timeout time.Duration) error {
 	for i, pool := range mp.pools {
 		func(p *PoolWithFunc, idx int) {
 			wg.Go(func() error {
-				err := p.ReleaseTimeout(timeout)
+				err := p.ReleaseTimeout(nil, timeout)
 				if err != nil {
 					err = fmt.Errorf("pool %d: %v", idx, err)
 				}
@@ -225,7 +226,7 @@ func (mp *MultiPoolWithFunc) Reboot() {
 	if atomic.CompareAndSwapInt32(&mp.state, CLOSED, OPENED) {
 		atomic.StoreUint32(&mp.index, 0)
 		for _, pool := range mp.pools {
-			pool.Reboot()
+			pool.Reboot(nil)
 		}
 	}
 }
